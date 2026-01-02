@@ -12,7 +12,9 @@
 # Requirements: gawk (GNU awk) - mawk is not compatible
 #
 
-set -e
+# Note: Using set +e because some subcommands may return non-zero
+# (e.g., grep when no matches found) which shouldn't abort the script
+set +e
 
 # Check for gawk (GNU awk) - required for match() with array capture
 if ! awk --version 2>/dev/null | grep -q "GNU Awk"; then
@@ -123,6 +125,16 @@ declare -A ACPI_TO_DT_COMPAT=(
 
     # AIPU / NPU
     ["CIXHA002"]="cix,sky1-aipu"
+
+    # Board-specific devices (from SSDT)
+    ["CIXH200D"]="cix,sky1-usb-pd"     # USB-C PD controller
+    ["CIXH6070"]="cix,sky1-sound"      # Sound card
+    ["ACPI0011"]="gpio-keys"           # Generic Buttons
+    ["PNP0C0C"]="gpio-keys"            # Power Button (ACPI standard)
+    ["ERTC0000"]="haoyu,hym8563"       # External I2C RTC
+
+    # PRP0001 devices get their compatible from _DSD, handled specially
+    ["PRP0001"]="PRP0001"              # Generic DT-compatible device
 )
 
 # Base address to node name mapping
@@ -245,6 +257,19 @@ check_extraction_dir() {
     fi
 
     [[ -f "$dir/acpi/DSDT.dsl" ]] || error "DSDT.dsl not found - was iasl installed during extraction?"
+
+    # Disassemble SSDT files if they exist as binary (not already .dsl)
+    for ssdt in "$dir/acpi/SSDT"*; do
+        [[ -f "$ssdt" ]] || continue
+        [[ "$ssdt" == *.dsl ]] && continue
+        local ssdt_dsl="${ssdt}.dsl"
+        if [[ ! -f "$ssdt_dsl" ]]; then
+            log "Disassembling $(basename "$ssdt")..."
+            iasl -p "$ssdt_dsl" -d "$ssdt" 2>/dev/null || true
+            # iasl adds .dsl automatically, so rename if needed
+            [[ -f "${ssdt_dsl}.dsl" ]] && mv "${ssdt_dsl}.dsl" "$ssdt_dsl"
+        fi
+    done
 }
 
 #############################################################################
@@ -691,6 +716,213 @@ parse_gpio_config() {
         }
     }
     ' "$gpio_file" 2>/dev/null
+}
+
+#############################################################################
+# SSDT PRP0001 Device Extractor
+#############################################################################
+
+# Storage for board-specific devices from SSDT
+declare -A SSDT_REGULATORS=()    # name -> "gpio_ctrl|gpio_pin|voltage_uv|always_on"
+declare -A SSDT_LEDS=()          # name -> "gpio_ctrl|gpio_pin|trigger"
+declare -A SSDT_BUTTONS=()       # name -> "gpio_ctrl|gpio_pin|linux_code"
+
+# Extract PRP0001 devices (regulators, LEDs) from SSDT files
+extract_prp0001_devices() {
+    local ssdt_file="$1"
+
+    [[ -f "$ssdt_file" ]] || return 0
+
+    log "Extracting PRP0001 devices from $(basename "$ssdt_file")..."
+
+    # Parse PRP0001 devices with their _DSD compatible and GPIO resources
+    local result
+    result=$(awk '
+    BEGIN {
+        device = ""
+        in_prp0001 = 0
+        in_dsd = 0
+        in_crs = 0
+        compatible = ""
+        reg_name = ""
+        voltage = ""
+        always_on = 0
+        gpio_ctrl = ""
+        gpio_pin = ""
+        led_trigger = ""
+        wait_value = ""
+    }
+
+    # Track device entry
+    /Device \([A-Z0-9]+\)/ {
+        if (match($0, /Device \(([A-Z0-9]+)\)/, arr)) {
+            # Output previous device if it was a regulator or LED
+            if (in_prp0001 && compatible != "") {
+                if (compatible == "regulator-fixed" && reg_name != "") {
+                    printf "REG|%s|%s|%s|%s|%s\n", reg_name, gpio_ctrl, gpio_pin, voltage, always_on
+                } else if (compatible == "gpio-leds") {
+                    printf "LEDS|%s|%s|%s\n", device, gpio_ctrl, gpio_pin
+                }
+            }
+            device = arr[1]
+            in_prp0001 = 0
+            in_dsd = 0
+            in_crs = 0
+            compatible = ""
+            reg_name = ""
+            voltage = ""
+            always_on = 0
+            gpio_ctrl = ""
+            gpio_pin = ""
+            led_trigger = ""
+        }
+    }
+
+    # Check for PRP0001 HID
+    /Name \(_HID, "PRP0001"\)/ {
+        in_prp0001 = 1
+    }
+
+    # Track _CRS section for GPIO
+    in_prp0001 && /Name \(_CRS,/ { in_crs = 1 }
+    in_prp0001 && in_crs && /\)$/ && !/ResourceTemplate/ { in_crs = 0 }
+
+    # Extract GPIO controller from GpioIo
+    in_prp0001 && in_crs && /\\_SB\.GPI[0-9]/ {
+        if (match($0, /\\_SB\.(GPI[0-9])/, arr)) {
+            gpio_ctrl = arr[1]
+        }
+    }
+
+    # Extract GPIO pin from pin list
+    in_prp0001 && in_crs && /Pin list/ { in_pin_list = 1; next }
+    in_prp0001 && in_pin_list && /0x[0-9A-Fa-f]+/ {
+        if (match($0, /0x([0-9A-Fa-f]+)/, arr)) {
+            gpio_pin = strtonum("0x" arr[1])
+        }
+        in_pin_list = 0
+    }
+
+    # Track _DSD section
+    in_prp0001 && /Name \(_DSD,/ { in_dsd = 1 }
+
+    # Extract compatible
+    in_prp0001 && in_dsd && /"compatible",/ { wait_value = "compatible"; next }
+    in_prp0001 && in_dsd && wait_value == "compatible" {
+        if (match($0, /"([a-z][a-z0-9-]*)"/, arr)) {
+            compatible = arr[1]
+            wait_value = ""
+        }
+    }
+
+    # Extract regulator-name
+    in_prp0001 && in_dsd && /"regulator-name",/ { wait_value = "reg_name"; next }
+    in_prp0001 && in_dsd && wait_value == "reg_name" {
+        if (match($0, /"([^"]+)"/, arr)) {
+            reg_name = arr[1]
+            wait_value = ""
+        }
+    }
+
+    # Extract regulator voltage
+    in_prp0001 && in_dsd && /"regulator-min-microvolt",/ { wait_value = "voltage"; next }
+    in_prp0001 && in_dsd && wait_value == "voltage" {
+        if (match($0, /0x([0-9A-Fa-f]+)/, arr)) {
+            voltage = strtonum("0x" arr[1])
+            wait_value = ""
+        } else if (match($0, /([0-9]+)/, arr)) {
+            voltage = arr[1]
+            wait_value = ""
+        }
+    }
+
+    # Check for regulator-always-on
+    in_prp0001 && in_dsd && /"regulator-always-on"/ {
+        always_on = 1
+    }
+
+    END {
+        # Output last device
+        if (in_prp0001 && compatible != "") {
+            if (compatible == "regulator-fixed" && reg_name != "") {
+                printf "REG|%s|%s|%s|%s|%s\n", reg_name, gpio_ctrl, gpio_pin, voltage, always_on
+            } else if (compatible == "gpio-leds") {
+                printf "LEDS|%s|%s|%s\n", device, gpio_ctrl, gpio_pin
+            }
+        }
+    }
+    ' "$ssdt_file")
+
+    # Parse results into associative arrays
+    local reg_count=0 led_count=0
+    while IFS='|' read -r type val1 val2 val3 val4 val5; do
+        [[ -z "$type" ]] && continue
+        case "$type" in
+            REG)
+                SSDT_REGULATORS["$val1"]="${val2}|${val3}|${val4}|${val5}"
+                ((reg_count++)) || true
+                ;;
+            LEDS)
+                # For LEDs we need to parse individual LED entries separately
+                ((led_count++)) || true
+                ;;
+        esac
+    done <<< "$result"
+
+    log "  Found $reg_count regulators, $led_count LED devices"
+}
+
+# Extract ACPI0011 (Generic Buttons) and individual LED entries
+extract_buttons_and_leds() {
+    local ssdt_file="$1"
+
+    [[ -f "$ssdt_file" ]] || return 0
+
+    # Check for ACPI0011 (gpio-keys) device
+    if grep -q 'Name (_HID, "ACPI0011")' "$ssdt_file" 2>/dev/null; then
+        log "  Found ACPI0011 (GPIO buttons) device"
+        # Extract button GPIO - complex structure, simplified extraction
+        local btn_info
+        btn_info=$(awk '
+        /Name \(_HID, "ACPI0011"\)/ { in_btns = 1 }
+        in_btns && /\\_SB\.GPI[0-9]/ {
+            if (match($0, /\\_SB\.(GPI[0-9])/, arr)) {
+                gpio_ctrl = arr[1]
+            }
+        }
+        in_btns && /Pin list/ { in_pin = 1; next }
+        in_btns && in_pin && /0x[0-9A-Fa-f]+/ {
+            if (match($0, /0x([0-9A-Fa-f]+)/, arr)) {
+                printf "%s|%s\n", gpio_ctrl, strtonum("0x" arr[1])
+            }
+            in_pin = 0
+        }
+        ' "$ssdt_file" | head -1)
+
+        if [[ -n "$btn_info" ]]; then
+            SSDT_BUTTONS["power"]="$btn_info|116"  # KEY_POWER = 116
+        fi
+    fi
+
+    # Extract individual LED entries from LEDS device _DSD
+    local led_result
+    led_result=$(awk '
+    BEGIN { in_leds = 0; in_dsd = 0 }
+    /Device \(LEDS\)/ { in_leds = 1 }
+    in_leds && /Device \([A-Z0-9]+\)/ && !/Device \(LEDS\)/ { in_leds = 0 }
+    in_leds && /Name \(_DSD,/ { in_dsd = 1 }
+    in_leds && in_dsd && /"label",/ { wait_label = 1; next }
+    in_leds && in_dsd && wait_label {
+        if (match($0, /"([^"]+)"/, arr)) {
+            printf "LED|%s\n", arr[1]
+            wait_label = 0
+        }
+    }
+    ' "$ssdt_file")
+
+    while IFS='|' read -r type name; do
+        [[ "$type" == "LED" ]] && SSDT_LEDS["$name"]="unknown|0|none"
+    done <<< "$led_result"
 }
 
 #############################################################################
@@ -1354,14 +1586,141 @@ EOF
     done
 }
 
-# Generate fixed regulators based on extraction
+# Generate fixed regulators from SSDT PRP0001 devices
+generate_regulators_from_ssdt() {
+    [[ ${#SSDT_REGULATORS[@]} -eq 0 ]] && return
+
+    echo ""
+    echo "	/* Fixed Regulators (from ACPI SSDT) */"
+
+    for reg_name in "${!SSDT_REGULATORS[@]}"; do
+        local data="${SSDT_REGULATORS[$reg_name]}"
+        local gpio_ctrl gpio_pin voltage always_on
+        IFS='|' read -r gpio_ctrl gpio_pin voltage always_on <<< "$data"
+
+        # Convert GPI0-6 to proper phandle names
+        local gpio_phandle=""
+        case "$gpio_ctrl" in
+            GPI0) gpio_phandle="fch_gpio0" ;;
+            GPI1) gpio_phandle="fch_gpio1" ;;
+            GPI2) gpio_phandle="fch_gpio2" ;;
+            GPI3) gpio_phandle="fch_gpio3" ;;
+            GPI4) gpio_phandle="s5_gpio0" ;;
+            GPI5) gpio_phandle="s5_gpio2" ;;
+            GPI6) gpio_phandle="s5_gpio1" ;;
+            *) gpio_phandle="$gpio_ctrl" ;;
+        esac
+
+        # Sanitize regulator name for node name
+        local node_name="${reg_name//-/_}"
+        node_name="${node_name// /_}"
+
+        cat << EOF
+
+	${node_name}: regulator-${node_name} {
+		compatible = "regulator-fixed";
+		regulator-name = "${reg_name}";
+EOF
+        if [[ -n "$voltage" && "$voltage" != "0" ]]; then
+            cat << EOF
+		regulator-min-microvolt = <${voltage}>;
+		regulator-max-microvolt = <${voltage}>;
+EOF
+        fi
+
+        if [[ -n "$gpio_phandle" && -n "$gpio_pin" && "$gpio_pin" != "0" ]]; then
+            cat << EOF
+		gpio = <&${gpio_phandle} ${gpio_pin} GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+EOF
+        fi
+
+        if [[ "$always_on" == "1" ]]; then
+            echo "		regulator-always-on;"
+        fi
+
+        echo "	};"
+    done
+}
+
+# Generate GPIO keys from SSDT ACPI0011 device
+generate_gpio_keys_from_ssdt() {
+    [[ ${#SSDT_BUTTONS[@]} -eq 0 ]] && return
+
+    echo ""
+    echo "	/* GPIO Keys (from ACPI SSDT) */"
+    echo "	gpio-keys {"
+    echo "		compatible = \"gpio-keys\";"
+
+    for btn_name in "${!SSDT_BUTTONS[@]}"; do
+        local data="${SSDT_BUTTONS[$btn_name]}"
+        local gpio_ctrl gpio_pin linux_code
+        IFS='|' read -r gpio_ctrl gpio_pin linux_code <<< "$data"
+
+        # Convert GPI to phandle
+        local gpio_phandle=""
+        case "$gpio_ctrl" in
+            GPI0) gpio_phandle="fch_gpio0" ;;
+            GPI1) gpio_phandle="fch_gpio1" ;;
+            GPI2) gpio_phandle="fch_gpio2" ;;
+            GPI3) gpio_phandle="fch_gpio3" ;;
+            GPI4) gpio_phandle="s5_gpio0" ;;
+            GPI5) gpio_phandle="s5_gpio2" ;;
+            GPI6) gpio_phandle="s5_gpio1" ;;
+            *) gpio_phandle="$gpio_ctrl" ;;
+        esac
+
+        cat << EOF
+
+		button-${btn_name} {
+			label = "${btn_name}";
+			linux,code = <${linux_code}>;
+			gpios = <&${gpio_phandle} ${gpio_pin} GPIO_ACTIVE_LOW>;
+			wakeup-source;
+		};
+EOF
+    done
+    echo "	};"
+}
+
+# Generate GPIO LEDs from SSDT
+generate_gpio_leds_from_ssdt() {
+    [[ ${#SSDT_LEDS[@]} -eq 0 ]] && return
+
+    echo ""
+    echo "	/* GPIO LEDs (from ACPI SSDT) */"
+    echo "	gpio-leds {"
+    echo "		compatible = \"gpio-leds\";"
+
+    for led_name in "${!SSDT_LEDS[@]}"; do
+        local data="${SSDT_LEDS[$led_name]}"
+        # For now just output placeholder - full GPIO info needs more parsing
+        cat << EOF
+
+		led-${led_name} {
+			label = "${led_name}";
+			/* GPIO info requires additional SSDT parsing */
+		};
+EOF
+    done
+    echo "	};"
+}
+
+# Legacy: Generate fixed regulators from extraction file
 generate_regulators() {
     local regulator_file="$1"
 
+    # First output SSDT-extracted regulators
+    generate_regulators_from_ssdt
+
+    # Then add any from the extraction file that aren't in SSDT
     [[ ! -f "$regulator_file" ]] && return
 
+    # Only add from file if no SSDT regulators found
+    [[ ${#SSDT_REGULATORS[@]} -gt 0 ]] && return
+
     echo ""
-    echo "	/* Fixed Regulators */"
+    echo "	/* Fixed Regulators (from runtime extraction) */"
 
     grep -E "^[a-z_0-9-]+:" "$regulator_file" 2>/dev/null | head -20 | while read -r line; do
         local name=$(echo "$line" | cut -d: -f1 | tr '-' '_')
@@ -1583,14 +1942,36 @@ main() {
 
     local dsdt_file="$EXTRACTION_DIR/acpi/DSDT.dsl"
     local devices_tmp=$(mktemp)
+    local all_acpi_files_tmp=$(mktemp)
 
-    trap "rm -f $devices_tmp" EXIT
+    trap "rm -f $devices_tmp $all_acpi_files_tmp" EXIT
 
     # Extract devices from DSDT
     extract_dsdt_devices "$dsdt_file" "$devices_tmp"
 
     # Extract device properties (clocks, resets, pinctrl)
     extract_device_properties "$dsdt_file"
+
+    # Also parse SSDT files for board-specific devices (regulators, LEDs, buttons)
+    for ssdt_dsl in "$EXTRACTION_DIR/acpi/SSDT"*.dsl; do
+        [[ -f "$ssdt_dsl" ]] || continue
+        log "Parsing $(basename "$ssdt_dsl") for board-specific devices..."
+        local ssdt_tmp=$(mktemp)
+        extract_dsdt_devices "$ssdt_dsl" "$ssdt_tmp"
+        local ssdt_count=$(wc -l < "$ssdt_tmp")
+        if [[ $ssdt_count -gt 0 ]]; then
+            cat "$ssdt_tmp" >> "$devices_tmp"
+            log "  Found $ssdt_count additional devices in SSDT"
+        fi
+        # Also extract properties from SSDT
+        extract_device_properties "$ssdt_dsl"
+
+        # Extract PRP0001 devices (regulators, LEDs) from SSDT
+        extract_prp0001_devices "$ssdt_dsl"
+        extract_buttons_and_leds "$ssdt_dsl"
+
+        rm -f "$ssdt_tmp"
+    done
 
     log "Generating DTS to: $OUTPUT_DTS"
 
@@ -1610,6 +1991,8 @@ main() {
         generate_gic_node
         generate_cru_and_reset_nodes "$devices_tmp"
         generate_regulators "$EXTRACTION_DIR/12-regulators.txt"
+        generate_gpio_keys_from_ssdt
+        generate_gpio_leds_from_ssdt
         generate_panel_backlight "$devices_tmp"
         generate_soc_node "$devices_tmp" "$EXTRACTION_DIR"
 
@@ -1642,6 +2025,12 @@ main() {
     log "Resets:  ${#DEVICE_RESETS[@]} devices with reset IDs"
     log "Pinctrl: ${#DEVICE_PINCTRL[@]} devices with pinctrl groups"
     log "DSD:     ${#DEVICE_DSD[@]} devices with properties"
+
+    log ""
+    log "=== SSDT Board-Specific Devices ==="
+    log "Regulators: ${#SSDT_REGULATORS[@]} fixed-regulator devices"
+    log "Buttons:    ${#SSDT_BUTTONS[@]} GPIO key devices"
+    log "LEDs:       ${#SSDT_LEDS[@]} GPIO LED devices"
 
     log ""
     log "Next steps:"

@@ -3,7 +3,7 @@
  * Device Tree Source for Radxa Orion O6
  *
  * Auto-generated from ACPI DSDT by acpi-to-dts.sh
- * Generated: 2026-01-02T17:39:43+11:00
+ * Generated: 2026-01-02T18:29:08+11:00
  *
  * This file was created from hardware extraction data.
  * Manual review and adjustment is required before use.
@@ -184,7 +184,64 @@
 		#reset-cells = <1>;
 	};
 
-	/* Fixed Regulators */
+	/* Fixed Regulators (from ACPI SSDT) */
+
+	gbe1_power_3v3: regulator-gbe1_power_3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "gbe1_power_3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	gbe2_power_3v3: regulator-gbe2_power_3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "gbe2_power_3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	vcc_ssd_pwren: regulator-vcc_ssd_pwren {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_ssd_pwren";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	cam_power_en_4: regulator-cam_power_en_4 {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_power_en_4";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	vdd_3v3_pcie: regulator-vdd_3v3_pcie {
+		compatible = "regulator-fixed";
+		regulator-name = "vdd_3v3_pcie";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	vgfx_power: regulator-vgfx_power {
+		compatible = "regulator-fixed";
+		regulator-name = "vgfx_power";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	/* GPIO LEDs (from ACPI SSDT) */
+	gpio-leds {
+		compatible = "gpio-leds";
+
+		led-blue:status {
+			label = "blue:status";
+			/* GPIO info requires additional SSDT parsing */
+		};
+
+		led-green:power {
+			label = "green:power";
+			/* GPIO info requires additional SSDT parsing */
+		};
+	};
 
 	/* PWM Backlight */
 

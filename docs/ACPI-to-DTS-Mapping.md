@@ -1,12 +1,21 @@
 # ACPI to Device Tree Mapping Reference
 
-This document describes how CIX Sky1 ACPI DSDT data maps to Linux Device Tree properties.
+This document describes how CIX Sky1 ACPI DSDT and SSDT data maps to Linux Device Tree properties.
 
 ## Overview
 
 The CIX Sky1 UEFI firmware provides ACPI tables that describe hardware. When booting with
-Device Tree instead of ACPI, we need to convert this information. The DSDT (Differentiated
-System Description Table) contains device definitions with:
+Device Tree instead of ACPI, we need to convert this information.
+
+### ACPI Table Structure
+
+| Table | Contents | Extracted By |
+|-------|----------|--------------|
+| **DSDT** | SoC peripherals (I2C, UART, USB, PCIe, GPU, etc.) | `acpi-to-dts.sh` |
+| **SSDT1** | Board-specific devices (regulators, LEDs, buttons, sound) | `acpi-to-dts.sh` |
+| **SSDT2** | Additional board devices (cameras, sensors) | `acpi-to-dts.sh` |
+
+The DSDT (Differentiated System Description Table) contains device definitions with:
 
 | ACPI Construct | DTS Equivalent | Description |
 |----------------|----------------|-------------|
@@ -95,6 +104,45 @@ System Description Table) contains device definitions with:
 | CIXH6060 | 1 | `cix,sky1-rtc` | Real-Time Clock |
 | CIXH7020 | 2 | `cix,sky1-gmac` | Ethernet MAC |
 | CIXHA001 | 8 | `cix,sky1-mailbox` | Mailbox Controller |
+
+### Board-Specific Devices (from SSDT)
+
+| ACPI HID | DT Compatible | Device Type | Source |
+|----------|---------------|-------------|--------|
+| PRP0001 | (from _DSD) | Generic DT device | SSDT1 |
+| ACPI0011 | `gpio-keys` | Generic Buttons | SSDT1 |
+| PNP0C0C | `gpio-keys` | Power Button | SSDT1 |
+| CIXH200D | `cix,sky1-usb-pd` | USB-C PD Controller | SSDT1 |
+| CIXH6070 | `cix,sky1-sound` | Sound Card | SSDT1 |
+| ERTC0000 | `haoyu,hym8563` | External I2C RTC | SSDT1 |
+
+### PRP0001 Devices (Generic DT-Compatible)
+
+PRP0001 is a special ACPI HID that indicates the device's `compatible` string is defined
+in `_DSD` rather than derived from the HID. These are commonly used for board-specific
+devices:
+
+| _DSD Compatible | Count (O6N) | Count (O6) | Device Type |
+|-----------------|-------------|------------|-------------|
+| `regulator-fixed` | 13 | 6 | GPIO-controlled power rails |
+| `gpio-leds` | 1 | 1 | Status LEDs |
+
+#### Regulators Extracted from SSDT
+
+**O6N (13 regulators):**
+- `cam_power_en_4`, `cam_power_en_5` - Camera power enables
+- `vgfx_power` - GPU power
+- `vdd_3v3_pcie` - PCIe power
+- `gbe1_power_3v3`, `gbe2_power_3v3` - Ethernet power
+- `vdd_tpm_pwr_en` - TPM power
+- `vdd_3v3_bkey`, `vdd_bkey_reset` - B-Key slot
+- `vdd_5v0_ufs` - UFS storage power
+- `vdd_usb_drive_vbus0` - USB VBUS
+- `vdd_wl_radio_disable_l`, `vdd_bt_radio_disable_l` - WiFi/BT radio control
+
+**O6 (6 regulators):**
+- `vgfx_power`, `vdd_3v3_pcie`, `gbe1_power_3v3`, `gbe2_power_3v3`
+- `cam_power_en_4`, `vcc_ssd_pwren`
 
 ---
 
@@ -429,18 +477,37 @@ i2c0: i2c@04010000 {
 
 ---
 
-## What ACPI Doesn't Provide
+## What ACPI Provides vs What Requires Manual Work
 
-Some DTS properties cannot be extracted from ACPI and must be added manually:
+### Fully Extracted from ACPI (DSDT + SSDT)
+
+| Feature | Source | Notes |
+|---------|--------|-------|
+| SoC peripherals | DSDT | I2C, UART, SPI, GPIO, USB, PCIe, GPU, etc. |
+| Fixed regulators | SSDT (PRP0001) | Names and voltages; GPIO enables need resolution |
+| GPIO LEDs | SSDT (PRP0001) | Labels extracted; GPIO pins need additional work |
+| Buttons | SSDT (ACPI0011) | Device detected; GPIO mapping in progress |
+| Ethernet PHY | DSDT child devices | MDIO address and compatible |
+| Panel/backlight | DSDT (EDP0/DPBL) | Basic timing and GPIO |
+
+### Partially Extracted (Needs Enhancement)
+
+| Property | What's Extracted | What's Missing |
+|----------|------------------|----------------|
+| Regulator GPIO enables | GPIO controller reference | Pin number (uses phandle) |
+| LED GPIO pins | Labels | GPIO controller and pin |
+| Button GPIO | Controller detected | Full GPIO specification |
+| Pinctrl groups | Group names | Pin definitions (mux values) |
+
+### Requires Manual Work
 
 | Property | Source | Notes |
 |----------|--------|-------|
-| I2C child devices | i2cdetect / board schematic | Sensors, PMICs, etc. |
-| GPIO hog definitions | Board schematic | Default GPIO states |
-| Regulator definitions | Board schematic | Power supply topology |
-| Display timing | EDID / panel datasheet | Resolution, refresh rate |
+| I2C child devices | i2cdetect / board schematic | Sensors, touch, cameras, etc. |
+| Audio routing | Board schematic | I2S to codec/DP mapping |
 | CPU OPP tables | Vendor documentation | DVFS operating points |
 | Thermal zones | Vendor documentation | Trip points, cooling maps |
+| WiFi/BT configuration | Board schematic | Wake GPIOs, power sequencing |
 
 ---
 
