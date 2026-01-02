@@ -3,7 +3,7 @@
  * Device Tree Source for Radxa Orion O6
  *
  * Auto-generated from ACPI DSDT by acpi-to-dts.sh
- * Generated: 2026-01-02T16:27:52+11:00
+ * Generated: 2026-01-02T17:20:25+11:00
  *
  * This file was created from hardware extraction data.
  * Manual review and adjustment is required before use.
@@ -293,7 +293,7 @@
 
 		/* UART Controllers (ARM PL011) */
 
-		uart1: serial@040b0000 {
+		uart0: serial@040b0000 {
 			compatible = "arm,pl011", "arm,primecell";
 			reg = <0x0 0x040b0000 0x0 0x00001000>;
 			interrupts = <GIC_SPI 296 IRQ_TYPE_LEVEL_HIGH>;
@@ -304,7 +304,7 @@
 			status = "disabled";
 		};
 
-		uart2: serial@040c0000 {
+		uart1: serial@040c0000 {
 			compatible = "arm,pl011", "arm,primecell";
 			reg = <0x0 0x040c0000 0x0 0x00001000>;
 			interrupts = <GIC_SPI 297 IRQ_TYPE_LEVEL_HIGH>;
@@ -312,10 +312,10 @@
 			clock-names = "uartclk", "apb_pclk";
 			pinctrl-names = "default";
 			pinctrl-0 = <&pinctrl_fch_uart1>;
-			status = "okay";
+			status = "disabled";
 		};
 
-		uart3: serial@040d0000 {
+		uart2: serial@040d0000 {
 			compatible = "arm,pl011", "arm,primecell";
 			reg = <0x0 0x040d0000 0x0 0x00001000>;
 			interrupts = <GIC_SPI 298 IRQ_TYPE_LEVEL_HIGH>;
@@ -323,10 +323,10 @@
 			clock-names = "uartclk", "apb_pclk";
 			pinctrl-names = "default";
 			pinctrl-0 = <&pinctrl_fch_uart2>;
-			status = "disabled";
+			status = "okay";
 		};
 
-		uart4: serial@040e0000 {
+		uart3: serial@040e0000 {
 			compatible = "arm,pl011", "arm,primecell";
 			reg = <0x0 0x040e0000 0x0 0x00001000>;
 			interrupts = <GIC_SPI 299 IRQ_TYPE_LEVEL_HIGH>;

@@ -883,12 +883,13 @@ generate_uart_controllers() {
         [[ -z "$addr" || "$addr" == "00000000" ]] && continue
 
         local irq_spi=$(irq_to_spi "$irq")
-        local dev_name="COM$((uid-1))"  # COM0 = uart1 in ACPI
+        local dev_name="COM$((uid-1))"  # COM0 has UID=1, COM1 has UID=2, etc.
 
-        # Map UID to uart name (UART2 is console on O6)
-        local uart_name="uart$uid"
+        # Map UID to uart name: UID=1→uart0, UID=2→uart1, UID=3→uart2 (console)
+        local uart_idx=$((uid-1))
+        local uart_name="uart$uart_idx"
         local status="disabled"
-        [[ $uid -eq 2 ]] && status="okay"
+        [[ $uid -eq 3 ]] && status="okay"  # uart2 (COM2/UID3) is console
 
         # Extract clock info (UARTs typically have 2 clocks)
         local clk_info="${DEVICE_CLOCKS[$dev_name]:-}"
