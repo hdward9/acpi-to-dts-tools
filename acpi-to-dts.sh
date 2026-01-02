@@ -187,6 +187,12 @@ declare -A ADDR_TO_NODE=(
     ["16007000"]="pinctrl_s5"
 )
 
+# Device-specific extracted data (populated by DSDT parser)
+declare -A DEVICE_CLOCKS      # device -> "clock_id:clock_name"
+declare -A DEVICE_RESETS      # device -> "rst_controller:rst_id:rst_name"
+declare -A DEVICE_PINCTRL     # device -> "pinctrl_group"
+declare -A DEVICE_DSD         # device -> "prop=value,prop=value"
+
 #############################################################################
 # Helper Functions
 #############################################################################
@@ -343,6 +349,206 @@ extract_dsdt_devices() {
     log "Extracted $(grep -c '^[^#]' "$output_file" 2>/dev/null || echo 0) unique devices"
 }
 
+# Extract CLKT (Clock Table), RSTL (Reset List), PinGroupFunction, and _DSD
+extract_device_properties() {
+    local dsdt_file="$1"
+
+    log "Extracting device properties (clocks, resets, pinctrl, DSD)..."
+
+    # Parse with awk - one pass for all properties
+    local props
+    props=$(awk '
+    BEGIN {
+        device = ""
+        in_clkt = 0
+        in_rstl = 0
+        in_dsd = 0
+        clkt_brace = 0
+        rstl_brace = 0
+        dsd_brace = 0
+    }
+
+    # Track current device
+    /^[[:space:]]*Device \([A-Z0-9]+\)/ {
+        if (match($0, /Device \(([A-Z0-9]+)\)/, arr)) {
+            device = arr[1]
+        }
+    }
+
+    # CLKT parsing - clock table
+    device != "" && /Name \(CLKT,/ && !/Package \(0x00\)/ {
+        in_clkt = 1
+        clkt_brace = 0
+        clkt_id = ""
+        clkt_name = ""
+    }
+
+    in_clkt {
+        # Count braces in the original line
+        line = $0
+        gsub(/[^{]/, "", line)
+        clkt_brace += length(line)
+        line = $0
+        gsub(/[^}]/, "", line)
+        clkt_brace -= length(line)
+
+        # Match hex number (clock ID) - skip lines with "Package"
+        if (!/Package/ && match($0, /^[[:space:]]*(0x[0-9A-Fa-f]+),?[[:space:]]*$/, arr)) {
+            if (clkt_id == "") clkt_id = strtonum(arr[1])
+        }
+
+        # Match clock name string (on its own line, not in Package)
+        if (!/Package/ && match($0, /^[[:space:]]*"([^"]*)"/, arr)) {
+            if (clkt_name == "" && arr[1] != "") clkt_name = arr[1]
+        }
+
+        # End of CLKT - look for closing `})`
+        if (/\}\)[[:space:]]*$/) {
+            if (clkt_id != "") {
+                printf "CLKT|%s|%s|%s\n", device, clkt_id, clkt_name
+            }
+            in_clkt = 0
+        }
+    }
+
+    # RSTL parsing - reset list
+    device != "" && /Name \(RSTL,/ && !/Package \(0x00\)/ {
+        in_rstl = 1
+        rstl_brace = 0
+        rstl_ctrl = ""
+        rstl_id = ""
+        rstl_name = ""
+    }
+
+    in_rstl {
+        # Count braces
+        line = $0
+        gsub(/[^{]/, "", line)
+        rstl_brace += length(line)
+        line = $0
+        gsub(/[^}]/, "", line)
+        rstl_brace -= length(line)
+
+        # RST controller reference (RST0 or RST1) - on its own line
+        if (!/Package/ && match($0, /^[[:space:]]*(RST[0-9]),?[[:space:]]*$/, arr)) {
+            if (rstl_ctrl == "") rstl_ctrl = arr[1]
+        }
+
+        # Reset ID (hex number) - on its own line after controller
+        if (rstl_ctrl != "" && !/Package/ && match($0, /^[[:space:]]*(0x[0-9A-Fa-f]+),?[[:space:]]*$/, arr)) {
+            if (rstl_id == "") rstl_id = strtonum(arr[1])
+        }
+
+        # Reset name (string) - on its own line
+        if (rstl_id != "" && match($0, /^[[:space:]]*"([^"]+)"[[:space:]]*$/, arr)) {
+            if (rstl_name == "") rstl_name = arr[1]
+        }
+
+        # End of RSTL - look for closing `})`
+        if (/\}\)[[:space:]]*$/) {
+            if (rstl_ctrl != "" && rstl_id != "") {
+                printf "RSTL|%s|%s|%s|%s\n", device, rstl_ctrl, rstl_id, rstl_name
+            }
+            in_rstl = 0
+        }
+    }
+
+    # PinGroupFunction parsing in _CRS
+    device != "" && /PinGroupFunction/ {
+        in_pgf = 1
+    }
+
+    in_pgf && /"[a-z][a-z0-9_-]*"/ {
+        if (match($0, /"([a-z][a-z0-9_-]*)"/, arr)) {
+            pgf_name = arr[1]
+            printf "PINCTRL|%s|%s\n", device, pgf_name
+        }
+        in_pgf = 0
+    }
+
+    # _DSD parsing - Device Specific Data
+    device != "" && /Name \(_DSD,/ {
+        in_dsd = 1
+        dsd_brace = 0
+        dsd_key = ""
+        dsd_pairs = ""
+    }
+
+    in_dsd {
+        # Count braces
+        line = $0
+        gsub(/[^{]/, "", line)
+        dsd_brace += length(line)
+        line = $0
+        gsub(/[^}]/, "", line)
+        dsd_brace -= length(line)
+
+        # Key-value on same line: "key", value  or  "key", "value"
+        if (match($0, /"([A-Za-z][A-Za-z0-9_-]*)",[[:space:]]*$/, arr)) {
+            dsd_key = arr[1]
+        }
+
+        # Value on next line after key
+        if (dsd_key != "") {
+            if (match($0, /^[[:space:]]+(0x[0-9A-Fa-f]+)/, arr)) {
+                dsd_val = strtonum(arr[1])
+                if (dsd_pairs != "") dsd_pairs = dsd_pairs ","
+                dsd_pairs = dsd_pairs dsd_key "=" dsd_val
+                dsd_key = ""
+            } else if (match($0, /^[[:space:]]+"([^"]*)"/, arr)) {
+                dsd_val = arr[1]
+                if (dsd_pairs != "") dsd_pairs = dsd_pairs ","
+                dsd_pairs = dsd_pairs dsd_key "=" dsd_val
+                dsd_key = ""
+            }
+        }
+
+        # End of _DSD - look for closing `)` or `})`
+        if (dsd_brace <= 0 && /\}?\)[[:space:]]*$/) {
+            if (dsd_pairs != "") {
+                printf "DSD|%s|%s\n", device, dsd_pairs
+            }
+            in_dsd = 0
+            dsd_pairs = ""
+        }
+    }
+
+    ' "$dsdt_file")
+
+    # Populate associative arrays
+    local clk_count=0 rst_count=0 pin_count=0 dsd_count=0
+
+    while IFS='|' read -r type device val1 val2 val3; do
+        [[ -z "$type" ]] && continue
+
+        case "$type" in
+            CLKT)
+                DEVICE_CLOCKS["$device"]="${val1}:${val2}"
+                ((clk_count++)) || true
+                ;;
+            RSTL)
+                DEVICE_RESETS["$device"]="${val1}:${val2}:${val3}"
+                ((rst_count++)) || true
+                ;;
+            PINCTRL)
+                # Append if multiple pinctrl groups
+                if [[ -n "${DEVICE_PINCTRL[$device]}" ]]; then
+                    DEVICE_PINCTRL["$device"]="${DEVICE_PINCTRL[$device]},${val1}"
+                else
+                    DEVICE_PINCTRL["$device"]="$val1"
+                fi
+                ((pin_count++)) || true
+                ;;
+            DSD)
+                DEVICE_DSD["$device"]="$val1"
+                ((dsd_count++)) || true
+                ;;
+        esac
+    done <<< "$props"
+
+    log "Extracted: $clk_count clocks, $rst_count resets, $pin_count pinctrl, $dsd_count DSD"
+}
+
 # Parse I2C devices from i2cdetect output
 parse_i2c_devices() {
     local i2c_file="$1"
@@ -403,12 +609,15 @@ EOF
  *
  * This file was created from hardware extraction data.
  * Manual review and adjustment is required before use.
+ *
+ * Preprocessing required (from kernel source directory):
+ *   cpp -nostdinc -I include -undef -x assembler-with-cpp \\
+ *       board.dts | dtc -I dts -O dtb -o board.dtb -
  */
 
 /dts-v1/;
 
 #include <dt-bindings/interrupt-controller/arm-gic.h>
-#include <dt-bindings/gpio/gpio.h>
 
 / {
 	#address-cells = <2>;
@@ -565,6 +774,35 @@ generate_i2c_controllers() {
         [[ -z "$addr" || "$addr" == "00000000" ]] && continue
 
         local irq_spi=$(irq_to_spi "$irq")
+        local dev_name="I2C$uid"
+
+        # Extract clock info
+        local clk_info="${DEVICE_CLOCKS[$dev_name]:-}"
+        local clk_id="" clk_name=""
+        if [[ -n "$clk_info" ]]; then
+            clk_id="${clk_info%%:*}"
+            clk_name="${clk_info#*:}"
+        fi
+
+        # Extract reset info
+        local rst_info="${DEVICE_RESETS[$dev_name]:-}"
+        local rst_ctrl="" rst_id="" rst_name=""
+        if [[ -n "$rst_info" ]]; then
+            rst_ctrl="${rst_info%%:*}"
+            local rest="${rst_info#*:}"
+            rst_id="${rest%%:*}"
+            rst_name="${rest#*:}"
+        fi
+
+        # Extract pinctrl
+        local pinctrl="${DEVICE_PINCTRL[$dev_name]:-}"
+
+        # Extract clock-frequency from DSD
+        local dsd="${DEVICE_DSD[$dev_name]:-}"
+        local clock_freq="400000"  # default
+        if [[ "$dsd" =~ clock-frequency=([0-9]+) ]]; then
+            clock_freq="${BASH_REMATCH[1]}"
+        fi
 
         cat << EOF
 
@@ -572,9 +810,37 @@ generate_i2c_controllers() {
 			compatible = "cdns,i2c-r1p14";
 			reg = <0x0 0x$addr 0x0 0x$size>;
 			interrupts = <GIC_SPI $irq_spi IRQ_TYPE_LEVEL_HIGH>;
+EOF
+
+        # Add clock reference if available
+        if [[ -n "$clk_id" ]]; then
+            echo "			clocks = <&cru $clk_id>;"
+            if [[ -n "$clk_name" ]]; then
+                echo "			clock-names = \"$clk_name\";"
+            fi
+        fi
+
+        # Add reset reference if available
+        if [[ -n "$rst_id" ]]; then
+            local rst_phandle="rst0"
+            [[ "$rst_ctrl" == "RST1" ]] && rst_phandle="rst1"
+            echo "			resets = <&$rst_phandle $rst_id>;"
+            if [[ -n "$rst_name" ]]; then
+                echo "			reset-names = \"$rst_name\";"
+            fi
+        fi
+
+        # Add pinctrl reference if available
+        if [[ -n "$pinctrl" ]]; then
+            local pin_group="${pinctrl%%,*}"  # take first group
+            echo "			pinctrl-names = \"default\";"
+            echo "			pinctrl-0 = <&$pin_group>;"
+        fi
+
+        cat << EOF
 			#address-cells = <1>;
 			#size-cells = <0>;
-			clock-frequency = <400000>;
+			clock-frequency = <$clock_freq>;
 			status = "okay";
 EOF
 
@@ -608,11 +874,32 @@ generate_uart_controllers() {
         [[ -z "$addr" || "$addr" == "00000000" ]] && continue
 
         local irq_spi=$(irq_to_spi "$irq")
+        local dev_name="COM$((uid-1))"  # COM0 = uart1 in ACPI
 
         # Map UID to uart name (UART2 is console on O6)
         local uart_name="uart$uid"
         local status="disabled"
         [[ $uid -eq 2 ]] && status="okay"
+
+        # Extract clock info (UARTs typically have 2 clocks)
+        local clk_info="${DEVICE_CLOCKS[$dev_name]:-}"
+        local clk_id=""
+        if [[ -n "$clk_info" ]]; then
+            clk_id="${clk_info%%:*}"
+        fi
+
+        # Extract reset info
+        local rst_info="${DEVICE_RESETS[$dev_name]:-}"
+        local rst_ctrl="" rst_id="" rst_name=""
+        if [[ -n "$rst_info" ]]; then
+            rst_ctrl="${rst_info%%:*}"
+            local rest="${rst_info#*:}"
+            rst_id="${rest%%:*}"
+            rst_name="${rest#*:}"
+        fi
+
+        # Extract pinctrl
+        local pinctrl="${DEVICE_PINCTRL[$dev_name]:-}"
 
         cat << EOF
 
@@ -620,8 +907,35 @@ generate_uart_controllers() {
 			compatible = "arm,pl011", "arm,primecell";
 			reg = <0x0 0x$addr 0x0 0x$size>;
 			interrupts = <GIC_SPI $irq_spi IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clk_uart>;
-			clock-names = "uartclk", "apb_pclk";
+EOF
+
+        # Add clock reference if available
+        if [[ -n "$clk_id" ]]; then
+            echo "			clocks = <&cru $clk_id>, <&cru $clk_id>;"
+            echo "			clock-names = \"uartclk\", \"apb_pclk\";"
+        else
+            echo "			clocks = <&clk_uart>, <&clk_uart>;"
+            echo "			clock-names = \"uartclk\", \"apb_pclk\";"
+        fi
+
+        # Add reset reference if available
+        if [[ -n "$rst_id" ]]; then
+            local rst_phandle="rst0"
+            [[ "$rst_ctrl" == "RST1" ]] && rst_phandle="rst1"
+            echo "			resets = <&$rst_phandle $rst_id>;"
+            if [[ -n "$rst_name" ]]; then
+                echo "			reset-names = \"$rst_name\";"
+            fi
+        fi
+
+        # Add pinctrl reference if available
+        if [[ -n "$pinctrl" ]]; then
+            local pin_group="${pinctrl%%,*}"
+            echo "			pinctrl-names = \"default\";"
+            echo "			pinctrl-0 = <&$pin_group>;"
+        fi
+
+        cat << EOF
 			status = "$status";
 		};
 EOF
@@ -639,6 +953,24 @@ generate_gpio_controllers() {
         [[ -z "$addr" || "$addr" == "00000000" ]] && continue
 
         local irq_spi=$(irq_to_spi "$irq")
+        local dev_name="GPI$uid"
+
+        # Extract clock info
+        local clk_info="${DEVICE_CLOCKS[$dev_name]:-}"
+        local clk_id=""
+        if [[ -n "$clk_info" ]]; then
+            clk_id="${clk_info%%:*}"
+        fi
+
+        # Extract reset info
+        local rst_info="${DEVICE_RESETS[$dev_name]:-}"
+        local rst_ctrl="" rst_id="" rst_name=""
+        if [[ -n "$rst_info" ]]; then
+            rst_ctrl="${rst_info%%:*}"
+            local rest="${rst_info#*:}"
+            rst_id="${rest%%:*}"
+            rst_name="${rest#*:}"
+        fi
 
         cat << EOF
 
@@ -646,6 +978,22 @@ generate_gpio_controllers() {
 			compatible = "cix,sky1-gpio";
 			reg = <0x0 0x$addr 0x0 0x$size>;
 			interrupts = <GIC_SPI $irq_spi IRQ_TYPE_LEVEL_HIGH>;
+EOF
+
+        if [[ -n "$clk_id" ]]; then
+            echo "			clocks = <&cru $clk_id>;"
+        fi
+
+        if [[ -n "$rst_id" ]]; then
+            local rst_phandle="rst0"
+            [[ "$rst_ctrl" == "RST1" ]] && rst_phandle="rst1"
+            echo "			resets = <&$rst_phandle $rst_id>;"
+            if [[ -n "$rst_name" ]]; then
+                echo "			reset-names = \"$rst_name\";"
+            fi
+        fi
+
+        cat << EOF
 			gpio-controller;
 			#gpio-cells = <2>;
 			interrupt-controller;
@@ -660,13 +1008,33 @@ EOF
         [[ -z "$addr" || "$addr" == "00000000" ]] && continue
 
         local irq_spi=$(irq_to_spi "$irq")
+        local dev_name="GP5$uid"  # S5 domain
+
+        # Extract reset info
+        local rst_info="${DEVICE_RESETS[$dev_name]:-}"
+        local rst_ctrl="" rst_id="" rst_name=""
+        if [[ -n "$rst_info" ]]; then
+            rst_ctrl="${rst_info%%:*}"
+            local rest="${rst_info#*:}"
+            rst_id="${rest%%:*}"
+            rst_name="${rest#*:}"
+        fi
 
         cat << EOF
 
-		gpio_s5: gpio@$addr {
+		gpio_s5_$uid: gpio@$addr {
 			compatible = "cix,sky1-gpio";
 			reg = <0x0 0x$addr 0x0 0x$size>;
 			interrupts = <GIC_SPI $irq_spi IRQ_TYPE_LEVEL_HIGH>;
+EOF
+
+        if [[ -n "$rst_id" ]]; then
+            local rst_phandle="rst0"
+            [[ "$rst_ctrl" == "RST1" ]] && rst_phandle="rst1"
+            echo "			resets = <&$rst_phandle $rst_id>;"
+        fi
+
+        cat << EOF
 			gpio-controller;
 			#gpio-cells = <2>;
 			status = "okay";
@@ -838,7 +1206,7 @@ EOF
     done
 }
 
-# Generate placeholder clock node
+# Generate placeholder clock node (fallback if CRU not found)
 generate_clock_placeholder() {
     cat << 'EOF'
 
@@ -849,6 +1217,66 @@ generate_clock_placeholder() {
 		clock-frequency = <24000000>;
 	};
 EOF
+}
+
+# Generate CRU (Clock Reset Unit) and Reset controller nodes
+generate_cru_and_reset_nodes() {
+    local devices_file="$1"
+
+    echo ""
+    echo "	/* Clock and Reset Controllers */"
+
+    # CRU - Clock Reset Unit - use CRU0 preferably (main clock controller)
+    local cru_line
+    cru_line=$(grep "CRU0|CIXHA018" "$devices_file" 2>/dev/null | head -1)
+    [[ -z "$cru_line" ]] && cru_line=$(grep -E "CIXHA018|CIXHA010" "$devices_file" 2>/dev/null | head -1)
+
+    if [[ -n "$cru_line" ]]; then
+        IFS='|' read -r name hid uid addr size irq <<< "$cru_line"
+        if [[ -n "$addr" && "$addr" != "00000000" ]]; then
+            cat << EOF
+
+	cru: clock-controller@$addr {
+		compatible = "cix,sky1-cru";
+		reg = <0x0 0x$addr 0x0 0x$size>;
+		#clock-cells = <1>;
+	};
+EOF
+        fi
+    fi
+
+    # Reset controller RST0 (S5 domain - CIXHA020)
+    grep "CIXHA020" "$devices_file" 2>/dev/null | head -1 | while IFS='|' read -r name hid uid addr size irq; do
+        [[ -z "$addr" || "$addr" == "00000000" ]] && continue
+
+        cat << EOF
+
+	rst0: reset-controller@$addr {
+		compatible = "cix,sky1-reset";
+		reg = <0x0 0x$addr 0x0 0x$size>;
+		#reset-cells = <1>;
+	};
+EOF
+    done
+
+    # Reset controller RST1 (FCH domain - CIXHA021)
+    grep "CIXHA021" "$devices_file" 2>/dev/null | head -1 | while IFS='|' read -r name hid uid addr size irq; do
+        [[ -z "$addr" || "$addr" == "00000000" ]] && continue
+
+        cat << EOF
+
+	rst1: reset-controller@$addr {
+		compatible = "cix,sky1-reset";
+		reg = <0x0 0x$addr 0x0 0x$size>;
+		#reset-cells = <1>;
+	};
+EOF
+    done
+
+    # Fallback clock if no CRU found
+    if ! grep -qE "CIXHA018|CIXHA010" "$devices_file" 2>/dev/null; then
+        generate_clock_placeholder
+    fi
 }
 
 #############################################################################
@@ -866,6 +1294,9 @@ main() {
     # Extract devices from DSDT
     extract_dsdt_devices "$dsdt_file" "$devices_tmp"
 
+    # Extract device properties (clocks, resets, pinctrl)
+    extract_device_properties "$dsdt_file"
+
     log "Generating DTS to: $OUTPUT_DTS"
 
     # Determine board model from extraction
@@ -881,7 +1312,7 @@ main() {
         generate_dts_header "$board_model" "$board_compat"
         generate_cpu_nodes "$EXTRACTION_DIR/01-system-info.txt"
         generate_gic_node
-        generate_clock_placeholder
+        generate_cru_and_reset_nodes "$devices_tmp"
         generate_regulators "$EXTRACTION_DIR/12-regulators.txt"
         generate_soc_node "$devices_tmp" "$EXTRACTION_DIR"
 
@@ -909,13 +1340,19 @@ main() {
     done
 
     log ""
+    log "=== Extracted Properties ==="
+    log "Clocks:  ${#DEVICE_CLOCKS[@]} devices with clock IDs"
+    log "Resets:  ${#DEVICE_RESETS[@]} devices with reset IDs"
+    log "Pinctrl: ${#DEVICE_PINCTRL[@]} devices with pinctrl groups"
+    log "DSD:     ${#DEVICE_DSD[@]} devices with properties"
+
+    log ""
     log "Next steps:"
     log "  1. Review generated DTS for accuracy"
-    log "  2. Add proper clock and reset references"
-    log "  3. Verify interrupt numbers against GIC documentation"
-    log "  4. Test compile: dtc -I dts -O dtb -o test.dtb $OUTPUT_DTS"
+    log "  2. Verify interrupt numbers against GIC documentation"
+    log "  3. Test compile: dtc -I dts -O dtb -o test.dtb $OUTPUT_DTS"
     if [[ -n "$REFERENCE_DTS" ]]; then
-        log "  5. Compare with working DTS: diff $OUTPUT_DTS $REFERENCE_DTS"
+        log "  4. Compare with working DTS: diff $OUTPUT_DTS $REFERENCE_DTS"
     fi
 }
 

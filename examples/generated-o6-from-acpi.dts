@@ -3,16 +3,19 @@
  * Device Tree Source for Radxa Orion O6
  *
  * Auto-generated from ACPI DSDT by acpi-to-dts.sh
- * Generated: 2026-01-02T15:17:11+11:00
+ * Generated: 2026-01-02T16:27:52+11:00
  *
  * This file was created from hardware extraction data.
  * Manual review and adjustment is required before use.
+ *
+ * Preprocessing required (from kernel source directory):
+ *   cpp -nostdinc -I include -undef -x assembler-with-cpp \
+ *       board.dts | dtc -I dts -O dtb -o board.dtb -
  */
 
 /dts-v1/;
 
 #include <dt-bindings/interrupt-controller/arm-gic.h>
-#include <dt-bindings/gpio/gpio.h>
 
 / {
 	#address-cells = <2>;
@@ -161,11 +164,24 @@
 		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_LOW>;
 	};
 
-	/* Clock placeholder - replace with actual clock controller */
-	clk_uart: clk_uart {
-		compatible = "fixed-clock";
-		#clock-cells = <0>;
-		clock-frequency = <24000000>;
+	/* Clock and Reset Controllers */
+
+	cru: clock-controller@16000000 {
+		compatible = "cix,sky1-cru";
+		reg = <0x0 0x16000000 0x0 0x00001000>;
+		#clock-cells = <1>;
+	};
+
+	rst0: reset-controller@16000000 {
+		compatible = "cix,sky1-reset";
+		reg = <0x0 0x16000000 0x0 0x00001000>;
+		#reset-cells = <1>;
+	};
+
+	rst1: reset-controller@04160000 {
+		compatible = "cix,sky1-reset";
+		reg = <0x0 0x04160000 0x0 0x00001000>;
+		#reset-cells = <1>;
 	};
 
 	/* Fixed Regulators */
@@ -183,6 +199,11 @@
 			compatible = "cdns,i2c-r1p14";
 			reg = <0x0 0x04010000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 286 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 253>;
+			resets = <&rst1 18>;
+			reset-names = "i2c_reset";
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_fch_i2c0>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			clock-frequency = <400000>;
@@ -193,6 +214,7 @@
 			compatible = "cdns,i2c-r1p14";
 			reg = <0x0 0x04020000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 287 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 254>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			clock-frequency = <400000>;
@@ -203,6 +225,11 @@
 			compatible = "cdns,i2c-r1p14";
 			reg = <0x0 0x04030000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 288 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 255>;
+			resets = <&rst1 20>;
+			reset-names = "i2c_reset";
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_fch_i2c2>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			clock-frequency = <400000>;
@@ -213,6 +240,7 @@
 			compatible = "cdns,i2c-r1p14";
 			reg = <0x0 0x04040000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 289 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 256>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			clock-frequency = <400000>;
@@ -223,6 +251,7 @@
 			compatible = "cdns,i2c-r1p14";
 			reg = <0x0 0x04050000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 290 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 257>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			clock-frequency = <400000>;
@@ -233,6 +262,7 @@
 			compatible = "cdns,i2c-r1p14";
 			reg = <0x0 0x04060000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 291 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 258>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			clock-frequency = <400000>;
@@ -243,6 +273,7 @@
 			compatible = "cdns,i2c-r1p14";
 			reg = <0x0 0x04070000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 292 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 259>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			clock-frequency = <400000>;
@@ -253,6 +284,7 @@
 			compatible = "cdns,i2c-r1p14";
 			reg = <0x0 0x04080000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 293 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 260>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			clock-frequency = <400000>;
@@ -265,8 +297,10 @@
 			compatible = "arm,pl011", "arm,primecell";
 			reg = <0x0 0x040b0000 0x0 0x00001000>;
 			interrupts = <GIC_SPI 296 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clk_uart>;
+			clocks = <&cru 246>, <&cru 246>;
 			clock-names = "uartclk", "apb_pclk";
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_fch_uart0>;
 			status = "disabled";
 		};
 
@@ -274,8 +308,10 @@
 			compatible = "arm,pl011", "arm,primecell";
 			reg = <0x0 0x040c0000 0x0 0x00001000>;
 			interrupts = <GIC_SPI 297 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clk_uart>;
+			clocks = <&cru 247>, <&cru 247>;
 			clock-names = "uartclk", "apb_pclk";
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_fch_uart1>;
 			status = "okay";
 		};
 
@@ -283,8 +319,10 @@
 			compatible = "arm,pl011", "arm,primecell";
 			reg = <0x0 0x040d0000 0x0 0x00001000>;
 			interrupts = <GIC_SPI 298 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clk_uart>;
+			clocks = <&cru 248>, <&cru 248>;
 			clock-names = "uartclk", "apb_pclk";
+			pinctrl-names = "default";
+			pinctrl-0 = <&pinctrl_fch_uart2>;
 			status = "disabled";
 		};
 
@@ -292,7 +330,7 @@
 			compatible = "arm,pl011", "arm,primecell";
 			reg = <0x0 0x040e0000 0x0 0x00001000>;
 			interrupts = <GIC_SPI 299 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clk_uart>;
+			clocks = <&cru 249>, <&cru 249>;
 			clock-names = "uartclk", "apb_pclk";
 			status = "disabled";
 		};
@@ -303,6 +341,9 @@
 			compatible = "cix,sky1-gpio";
 			reg = <0x0 0x04130000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 305 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 262>;
+			resets = <&rst1 26>;
+			reset-names = "apb_reset";
 			gpio-controller;
 			#gpio-cells = <2>;
 			interrupt-controller;
@@ -314,6 +355,9 @@
 			compatible = "cix,sky1-gpio";
 			reg = <0x0 0x04140000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 306 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 262>;
+			resets = <&rst1 26>;
+			reset-names = "apb_reset";
 			gpio-controller;
 			#gpio-cells = <2>;
 			interrupt-controller;
@@ -325,6 +369,9 @@
 			compatible = "cix,sky1-gpio";
 			reg = <0x0 0x04150000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 307 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 262>;
+			resets = <&rst1 26>;
+			reset-names = "apb_reset";
 			gpio-controller;
 			#gpio-cells = <2>;
 			interrupt-controller;
@@ -336,6 +383,7 @@
 			compatible = "cix,sky1-gpio";
 			reg = <0x0 0x16004000 0x0 0x00001000>;
 			interrupts = <GIC_SPI 372 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 262>;
 			gpio-controller;
 			#gpio-cells = <2>;
 			interrupt-controller;
@@ -347,6 +395,7 @@
 			compatible = "cix,sky1-gpio";
 			reg = <0x0 0x16005000 0x0 0x00001000>;
 			interrupts = <GIC_SPI 373 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 262>;
 			gpio-controller;
 			#gpio-cells = <2>;
 			interrupt-controller;
@@ -358,6 +407,7 @@
 			compatible = "cix,sky1-gpio";
 			reg = <0x0 0x16006000 0x0 0x00001000>;
 			interrupts = <GIC_SPI 374 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&cru 262>;
 			gpio-controller;
 			#gpio-cells = <2>;
 			interrupt-controller;
@@ -365,7 +415,7 @@
 			status = "okay";
 		};
 
-		gpio_s5: gpio@04120000 {
+		gpio_s5_0: gpio@04120000 {
 			compatible = "cix,sky1-gpio";
 			reg = <0x0 0x04120000 0x0 0x00010000>;
 			interrupts = <GIC_SPI 304 IRQ_TYPE_LEVEL_HIGH>;
