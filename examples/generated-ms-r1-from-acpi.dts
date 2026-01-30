@@ -20,8 +20,8 @@
 / {
 	#address-cells = <2>;
 	#size-cells = <2>;
-	model = "Radxa Orion O6";
-	compatible = "radxa,orion-o6", "cix,sky1";
+	model = "Minisforum MS-R1";
+	compatible = "minisforum,ms-r1", "cix,sky1";
 	interrupt-parent = <&gic>;
 
 	aliases {
